@@ -14,17 +14,17 @@ A 3-layer CNN was trained on **ColoredMNIST** — a modified MNIST dataset where
 
 Created a custom `ColoredMNIST` dataset from standard MNIST ($60{,}000$ samples):
 
-- **Train split** ($\sim 57{,}000$, majority): Each digit gets a fixed color (e.g., $0 \rightarrow$ Orange, $1 \rightarrow$ Red, $2 \rightarrow$ Blue, ...) with a clean black background.
-- **Test split** ($\sim 3{,}000$, minority): Digits get a *different* color than their assigned one, with a noisy textured background.
+- **Train split (the 'Easy' set):** Each digit gets a fixed color (e.g., $0 \rightarrow$ Orange, $1 \rightarrow$ Red, $2 \rightarrow$ Blue, ...) with a clean black background.
+- **Test split (the 'Hard' set):** Digits get a *different* color than their assigned one, with a noisy textured background.
 
-The majority fraction is controlled by a parameter $\rho = 0.95$. Binary masks $M \in \{0, 1\}^{28 \times 28}$ were generated from the grayscale images to separate digit pixels from background, used later in Task 4.
+Binary masks were generated from the grayscale images to separate digit pixels from background, used later in Task 4.
 
 ### Task 1 — The Cheater (Training the Biased Model)
 
-Architecture: 3 conv layers (encoder $\rightarrow$ middle $\rightarrow$ decoder) with BatchNorm + ReLU, followed by a 2-layer FC classifier. Input: $\mathbb{R}^{3 \times 28 \times 28}$, Output: $\mathbb{R}^{10}$.
+Architecture: 3 conv layers (encoder $\rightarrow$ middle $\rightarrow$ decoder) with BatchNorm + ReLU, followed by a 2-layer FC classifier. Input: 3-channel RGB $28 \times 28$, Output: 10 classes. Flattened decoder features ($3136$-dim) are mapped to a $64$-dim space and then to $10$ output classes.
 
-- **Loss:** Cross-Entropy $\mathcal{L}_{CE} = -\sum_{c} y_c \log(\hat{y}_c)$
-- **Optimizer:** Adam with $\text{lr} = 10^{-3}$
+- **Loss:** Cross-Entropy
+- **Optimizer:** Adam with lr $= 0.001$
 - **Epochs:** 20
 
 | Split | Loss | Accuracy |
@@ -37,31 +37,15 @@ Architecture: 3 conv layers (encoder $\rightarrow$ middle $\rightarrow$ decoder)
 
 ### Task 2 — The Prober (Neuron Analysis via Activation Maximization)
 
-Used activation maximization to visualize what the encoder's 16 feature maps respond to. For a given channel $c$, a random input $x$ is iteratively updated to maximize the mean activation:
-
-$$x^* = \arg\max_{x} \; \frac{1}{H \cdot W} \sum_{i,j} A_c(x)_{i,j}$$
-
-where $A_c(x)$ is the feature map of channel $c$. The update rule is:
-
-$$x_{t+1} = x_t + \eta \cdot \nabla_x \bar{A}_c(x_t)$$
-
-with $\eta = 0.05$ and $50{,}000$ iterations, clamping $x \in [-1, 1]$.
+Used activation maximization to visualize what the encoder's 16 feature maps respond to. A random input image is iteratively updated (gradient ascent on the target channel's mean activation) over $50{,}000$ iterations to reveal the patterns that channel is most responsive to.
 
 Two setups were tried:
 - **Without regularization:** Noisy results, but several channels clearly responded to specific colors (uniform yellow, green, blue, cyan). Some showed stripe/edge-like patterns.
-- **With regularization** ($L_2$ decay + Gaussian blur): Cleaner outputs. Multiple channels showed solid uniform colors, confirming the model's neurons are primarily encoding color rather than shape.
+- **With regularization** ($L_2$ decay + Gaussian blur): Cleaner outputs. Multiple channels (0, 1, 6, 11, 14) showed solid uniform colors, confirming the model's neurons are primarily encoding color rather than shape.
 
 ### Task 3 — The Interrogation (Grad-CAM)
 
-Implemented Grad-CAM from scratch. For target class $c$ and feature maps $A^k$ from the encoder:
-
-1. Compute importance weights:
-
-$$\alpha_k = \frac{1}{Z} \sum_{i} \sum_{j} \frac{\partial y^c}{\partial A^k_{ij}}$$
-
-2. Compute the class activation map:
-
-$$L_{\text{Grad-CAM}}^c = \text{ReLU}\left(\sum_k \alpha_k A^k\right)$$
+Implemented Grad-CAM from scratch to highlight which spatial regions influenced the model's prediction. The method computes the gradient of the target class score with respect to the encoder's feature maps, uses these gradients as importance weights, and produces a weighted combination passed through ReLU to generate the heatmap.
 
 **Observation:** On biased (train) images, the heatmap focuses on the digit area — but since color and shape overlap spatially, Grad-CAM alone can't distinguish which feature is being used. Combined with Task 2's results, it supports the conclusion that color is the dominant signal. On conflicting (test) images, the heatmap appears smeared due to the noisy background and mismatched colors.
 
@@ -71,29 +55,17 @@ Two gradient-based retraining methods were applied without modifying the dataset
 
 **Method 1 — Right for Right Reasons:**
 
-Penalizes the gradient magnitude on background pixels using the binary mask $M$:
-
-$$\mathcal{L}_{\text{penalty}} = \frac{1}{N} \sum_{n} \left\| \frac{\partial s_c}{\partial x_n} \odot M_n \right\|_2^2$$
-
-$$\mathcal{L}_{\text{total}} = \mathcal{L}_{CE} + \lambda_1 \cdot \mathcal{L}_{\text{penalty}}$$
-
-with $\lambda_1 = 100$, $\lambda_2 = 10^{-4}$ (weight decay).
+Penalizes the total gradient magnitude on background pixels using the binary mask. The total loss is: `classification_loss + λ × gradient_penalty`, with $\lambda = 100$.
 
 | Split | Loss | Accuracy |
 |-------|------|----------|
 | Test | $40.58$ | $5.37\%$ |
 
-Did not help much — since color and shape share the same spatial region (the digit), penalizing background gradients doesn't address the actual shortcut.
+Did not help much — since color and shape share the same spatial region (the digit), penalizing background gradients doesn't address the actual shortcut. This method was designed for spatially separable confounds (like Decoy-MNIST with corner patches), not for cases where the spurious feature overlaps with the real one.
 
 **Method 2 — Color Deviation Penalty:**
 
-Instead of penalizing all gradients, this penalizes the *deviation* between R, G, B channel gradients on digit pixels. Let $g = \nabla_x s_c \odot M$ be the masked gradient and $\bar{g}$ be its per-channel mean:
-
-$$\mathcal{L}_{\text{color}} = \frac{1}{N} \sum_n \left\| g_n - \bar{g}_n \right\|_2^2$$
-
-$$\mathcal{L}_{\text{total}} = \mathcal{L}_{CE} + \lambda_1 \cdot \mathcal{L}_{\text{color}}$$
-
-with $\lambda_1 = 0.5$. The model is allowed to look at the digit but forced to treat all color channels equally.
+Instead of penalizing all gradients, this penalizes the *deviation* between R, G, B channel gradients on digit pixels. The model is allowed to look at the digit but forced to treat all color channels equally. The total loss is: `cross_entropy_loss + λ × color_deviation_penalty`, with $\lambda = 0.5$.
 
 | Split | Loss | Accuracy |
 |-------|------|----------|
@@ -103,33 +75,17 @@ Better than Method 1 but still not satisfactory. The fundamental difficulty is t
 
 ### Task 5 — The Invisible Cloak (Targeted Adversarial Attack)
 
-Used PGD (Projected Gradient Descent) to craft an adversarial example: take an image of digit $7$ and make the retrained model classify it as $3$.
+Used PGD (Projected Gradient Descent) to craft an adversarial example: take an image of digit $7$ and try to make the retrained model classify it as $3$. At each step, the image is perturbed in the direction of the gradient's sign by a step size $\alpha = 0.001$, then clipped back to within $\varepsilon = 0.05$ of the original image. This is repeated for $\sim 200$–$300$ iterations.
 
-At each step $t$:
-
-$$x_{t+1} = \Pi_{x + \mathcal{S}} \left( x_t - \alpha \cdot \text{sign}(\nabla_x \mathcal{L}(f(x_t), y_{\text{target}})) \right)$$
-
-where $\Pi_{x + \mathcal{S}}$ projects back into the $\ell_\infty$ ball of radius $\varepsilon = 0.1$ around the original image, and $\alpha = 0.001$ with $300$ steps.
-
-**Observation:** The model's $P(y=3)$ increased slightly but remained low-confidence, showing some robustness of the retrained model against targeted attacks.
+**Observation:** The model's probability of choosing $3$ increased slightly but remained low-confidence, showing that the retrained model was reluctant to be fooled.
 
 ### Task 6 — Decomposition using Sparse Autoencoder
 
-Trained a Sparse Autoencoder (SAE) on the classifier layer's activations to decompose dense polysemantic representations into sparse monosemantic features.
-
-The SAE maps $h \in \mathbb{R}^{64}$ to a latent $z \in \mathbb{R}^{32768}$:
-
-$$z = \text{ReLU}(W_e h + b_e), \quad \hat{h} = W_d z + b_d$$
-
-Training objective:
-
-$$\mathcal{L}_{\text{SAE}} = \| h - \hat{h} \|_2^2 + \lambda_s \cdot \| z \|_1$$
-
-with $\lambda_s = 0.001$, optimized using Adam ($\text{lr} = 10^{-3}$, weight decay $= 0.001$).
+Trained a Sparse Autoencoder (SAE) on the classifier layer's activations (input dim $= 64$, hidden dim $= 32768$) to decompose dense polysemantic representations into sparse monosemantic features. The SAE is a simple 2-layer encoder-decoder trained with MSE reconstruction loss + $L_1$ sparsity penalty ($\lambda = 0.001$), using Adam (lr $= 10^{-3}$, weight decay $= 0.001$).
 
 **Feature identification:**
-- **Color features:** SAE latent neurons that activate consistently across samples of the same color but different digits.
-- **Shape features:** Neurons that activate across samples of the same digit but different colors.
+- **Color features:** Found by checking which SAE latent neurons activate consistently across samples of the same color but different digits.
+- **Shape features:** Found by checking which neurons activate across samples of the same digit but different colors.
 
 **Validation via activation patching:**
 - Zeroing out identified color features caused a noticeable drop in accuracy, confirming those neurons encode color.
