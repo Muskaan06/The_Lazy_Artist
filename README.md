@@ -4,6 +4,17 @@ A study on how image classification models exploit spurious features (like color
 
 Built as part of the **Precog (IIIT-H) research assignment**.
 
+## Update
+ 
+A third retraining method has been added to Task 4, inspired by [Learning Not to Learn: Training Deep Neural Networks with Biased Data (Kim et al., CVPR 2019)](https://openaccess.thecvf.com/content_CVPR_2019/papers/Kim_Learning_Not_to_Learn_Training_Deep_Neural_Networks_With_Biased_CVPR_2019_paper.pdf). Unlike Methods 1 and 2 which operate on input gradients, this approach trains a separate bias prediction network alongside the main model and uses adversarial training to force the feature extractor to unlearn color information entirely.
+ 
+The training alternates between two phases:
+- **Phase 1 (Classification + Entropy Minimization):** The main model is trained to classify digits while simultaneously minimizing the negative conditional entropy of the bias predictor's output. This pushes the bias predictor's predictions toward a uniform distribution, meaning the features contain no useful color information.
+- **Phase 2 (Gradient Reversal):** The bias predictor is trained to predict color from the feature representation, but the gradients flowing back into the feature extractor are *reversed*. This forces the feature extractor to actively remove color information from its representations.
+At the end of training, the bias predictor fails to predict color — not because it is poorly trained, but because the feature extractor has successfully unlearned the color bias.
+ 
+> **Note:** This method is still under development. Training and hyperparameter tuning are in progress, and results are awaited.
+
 ## Overview
 
 A 3-layer CNN was trained on **ColoredMNIST** — a modified MNIST dataset where each digit is assigned a specific color. The model achieves $\sim 100\%$ train accuracy but drops to $\sim 3\%$ on test data where colors are shuffled. The rest of the project investigates why this happens and what can be done about it.
